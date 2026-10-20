@@ -1,11 +1,12 @@
 # jagex-launcher-nix
 
-Nix package for the **official** Jagex Launcher for Linux (beta), the Electron
-AppImage Jagex ships at <https://oldschool.runescape.com/download>. It installs
-RuneLite for you and starts it, so you don't need Bolt.
+Nix flake for the official [Jagex Launcher for Linux](https://oldschool.runescape.com/download)
+(beta). Log in with a Jagex Account and play Old School RuneScape through
+RuneLite, no Bolt needed.
 
-The launcher is proprietary (`unfree`). This repo only holds the packaging; the
-binary is fetched from Jagex's own update server at build time.
+The launcher is unfree. This repo contains only the Nix expression; the
+AppImage is downloaded from Jagex's update server at build time and is not
+redistributed.
 
 ## Try it
 
@@ -13,48 +14,60 @@ binary is fetched from Jagex's own update server at build time.
 nix run github:Kahnix/jagex-launcher-nix
 ```
 
-The flake's `packages` output allows this one unfree package, so no
-`NIXPKGS_ALLOW_UNFREE` is needed.
-
 ## NixOS
 
 ```nix
-{
-  inputs.jagex-launcher.url = "github:Kahnix/jagex-launcher-nix";
+# flake.nix
+inputs.jagex-launcher = {
+  url = "github:Kahnix/jagex-launcher-nix";
+  inputs.nixpkgs.follows = "nixpkgs";
+};
+```
 
-  outputs = { nixpkgs, jagex-launcher, ... }: {
-    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
-      modules = [
-        ({ pkgs, ... }: {
-          nixpkgs.overlays = [ jagex-launcher.overlays.default ];
-          nixpkgs.config.allowUnfreePredicate =
-            pkg: nixpkgs.lib.getName pkg == "jagex-launcher";
-          environment.systemPackages = [ pkgs.jagex-launcher ];
-        })
-      ];
-    };
-  };
+```nix
+# a NixOS module, with `inputs` passed via specialArgs
+{ inputs, lib, pkgs, ... }:
+{
+  nixpkgs.overlays = [ inputs.jagex-launcher.overlays.default ];
+  nixpkgs.config.allowUnfreePredicate = pkg: lib.getName pkg == "jagex-launcher";
+  environment.systemPackages = [ pkgs.jagex-launcher ];
 }
 ```
 
-Or skip the overlay and use `jagex-launcher.packages.x86_64-linux.default`.
+For Home Manager, use `home.packages` instead. To pick up a new launcher
+release: `nix flake update jagex-launcher`.
 
-## How it works
+## Notes
 
-- `appimageTools.wrapType2` runs the AppImage in a bubblewrap FHS environment.
-- The launcher downloads `RuneLite.AppImage` into
-  `~/.local/share/Jagex Launcher/games/runelite/` and executes it. A nested
-  AppImage cannot FUSE-mount inside bubblewrap, so the wrapper exports
-  `APPIMAGE_EXTRACT_AND_RUN=1`; RuneLite extracts itself to `/tmp` and runs.
-- The launcher's built-in self-updater is inert (`APPIMAGE` is unset). Updates
-  come through this repo instead: `update.sh` reads Jagex's electron-updater
-  feed (`production/latest-linux.yml`), which carries the version and sha512,
-  and rewrites `package.nix`. The `update` workflow runs it daily and opens a PR.
-- The desktop entry registers the `rshub://` URL scheme the launcher uses.
+- Runs in an FHS environment via `appimageTools.wrapAppImage`.
+- Upstream, "Play Now" downloads `RuneLite.AppImage` and executes it. This
+  package patches the launcher's bundle to run nixpkgs `runelite` instead, so
+  nothing is downloaded and no nested AppImage is involved. Override with
+  `jagex-launcher.override { runelite = …; }` to use a different build.
+- The patch is two string substitutions on minified code, guarded with
+  `--replace-fail`: a launcher update that moves them fails the build rather
+  than silently falling back to the download path.
+- The launcher's self-updater does nothing outside an AppImage. Versions are
+  bumped here instead: `update.sh` reads Jagex's `latest-linux.yml` feed, and
+  a daily workflow opens a PR when it changes.
+- x86_64-linux only, since that is the only build Jagex publishes.
 
-## Updating manually
+RuneScape support in the launcher hasn't shipped on Linux yet; only OSRS via
+RuneLite is tested.
 
-```sh
-./update.sh
-nix build .#default
-```
+## Troubleshooting
+
+**Web login finishes in the browser but the launcher never logs in.** The
+browser hands the result back through an `rshub://` link. The first time,
+Firefox asks whether to open it with Jagex Launcher; if that prompt is missed
+or dismissed, nothing happens. Retry and allow it (tick "always"), or use the
+in-app login. Check the handler is registered with
+`xdg-mime query default x-scheme-handler/rshub`, which should print
+`jagex-launcher.desktop`.
+
+**RuneLite paints at its initial size and the rest of the window is black**
+(Hyprland, Sway, other non-reparenting compositors). nixpkgs `runelite` runs
+on OpenJDK 21 under XWayland, and AWT does not pick up resizes there without
+`_JAVA_AWT_WM_NONREPARENTING=1`. Set it in your session environment, e.g.
+`environment.sessionVariables._JAVA_AWT_WM_NONREPARENTING = "1";`, and log
+back in. The upstream AppImage hides this because it bundles its own JDK 17.
